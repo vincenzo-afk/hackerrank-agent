@@ -69,6 +69,7 @@ class Spinner:
         sys.stdout.write("\r" + " " * (len(self._label) + 6) + "\r")
         sys.stdout.flush()
 
+
     def _spin(self) -> None:
         i = 0
         while not self._stop.is_set():
@@ -188,7 +189,7 @@ class ChatSession:
     # Boot
     # ------------------------------------------------------------------
 
-    def boot(self) -> None:
+    def boot(self, force_reindex: bool = False) -> None:
         """Load corpus and initialise agent (shown once at startup)."""
         load_dotenv()
 
@@ -198,7 +199,10 @@ class ChatSession:
         from agent import TriageAgent
 
         print(f"\n  {dim('Loading corpus and building embedding index…')}")
-        print(f"  {dim('(This takes ~20 min on first run; subsequent runs use the cache.)')}")
+        if not force_reindex:
+            print(f"  {dim('(This takes ~20 min on first run; subsequent runs use the cache.)')}")
+        else:
+            print(f"  {yellow('!')} {dim('Force reindexing enabled. This will take ~20 minutes.')}")
         print()
 
         spinner = Spinner("Indexing corpus")
@@ -206,7 +210,7 @@ class ChatSession:
 
         try:
             self._retriever = CorpusRetriever()
-            self._retriever.load_and_index()
+            self._retriever.load_and_index(force_reindex=force_reindex)
             self._agent = TriageAgent(self._retriever)
         finally:
             spinner.stop()
@@ -300,13 +304,13 @@ class ChatSession:
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
+    def run(self, force_reindex: bool = False) -> None:
         print(BANNER)
         if self.company_override:
             fn = COMPANY_COLOURS.get(self.company_override, dim)
             print(f"  Company context pre-set: {fn(self.company_override)}\n")
 
-        self.boot()
+        self.boot(force_reindex=force_reindex)
 
         prompt_prefix = cyan("  ›  ")
 
@@ -362,10 +366,15 @@ def main() -> None:
         default=None,
         help="Pre-set the company context (skips auto-detection)",
     )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="Force rebuild of the embedding index (ignores cache)",
+    )
     args = parser.parse_args()
 
     session = ChatSession(preset_company=args.company)
-    session.run()
+    session.run(force_reindex=args.reindex)
 
 
 if __name__ == "__main__":

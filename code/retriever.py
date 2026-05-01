@@ -140,7 +140,10 @@ class CorpusRetriever:
         self._chunks: list[Chunk] = []
         self._embeddings: np.ndarray | None = None
 
-    def load_and_index(self) -> None:
+    def load_and_index(self, force_reindex: bool = False) -> None:
+        """
+        Load corpus files, chunk them, and compute/load embeddings.
+        """
         debug_log(
             run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H1",

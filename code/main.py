@@ -38,6 +38,11 @@ def main() -> None:
         action="store_true",
         help="Run on sample_support_tickets.csv instead (for validation)",
     )
+    parser.add_argument(
+        "--reindex",
+        action="store_true",
+        help="Force rebuild of the embedding index (ignores cache)",
+    )
     args = parser.parse_args()
 
     # Allow --sample flag to override input to the sample file
@@ -52,7 +57,7 @@ def main() -> None:
 
     # Build retriever + index
     retriever = CorpusRetriever()
-    retriever.load_and_index()
+    retriever.load_and_index(force_reindex=args.reindex)
 
     # Build agent
     agent = TriageAgent(retriever)
