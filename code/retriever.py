@@ -18,24 +18,81 @@ try:
 except Exception:  # pragma: no cover
     SentenceTransformer = None  # type: ignore
 
+try:
+    from bs4 import BeautifulSoup  # used for HTML stripping
+    _BS4_AVAILABLE = True
+except ImportError:
+    _BS4_AVAILABLE = False
+
+import re as _re
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT_DIR / "data"
 
+ALLOWED_EXTS = {".txt", ".md", ".html", ".htm", ".json", ".csv"}
 
-ALLOWED_EXTS = {".txt", ".md", ".html", ".json", ".csv"}
+
+def _strip_html(raw: str) -> str:
+    """Strip HTML tags and decode entities into plain text."""
+    if _BS4_AVAILABLE:
+        soup = BeautifulSoup(raw, "html.parser")
+        # Remove script and style blocks entirely
+        for tag in soup(["script", "style", "meta", "noscript", "head"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ")
+    else:
+        # Fallback: regex strip
+        text = _re.sub(r"<[^>]+>", " ", raw)
+    # Collapse whitespace
+    text = _re.sub(r"[ \t]+", " ", text)
+    text = _re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _parse_json(raw: str) -> str:
+    """
+    Convert JSON to readable plain text.
+    If the JSON is a list of objects, join them as key: value lines.
+    Falls back to the raw text on parse failure.
+    """
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return raw
+
+    lines: list[str] = []
+
+    def _flatten(o: object, prefix: str = "") -> None:
+        if isinstance(o, dict):
+            for k, v in o.items():
+                _flatten(v, prefix=f"{prefix}{k}: " if not prefix else f"{prefix} > {k}: ")
+        elif isinstance(o, list):
+            for item in o:
+                _flatten(item, prefix)
+        else:
+            lines.append(f"{prefix}{o}")
+
+    _flatten(obj)
+    return "\n".join(lines) if lines else raw
 
 
 def _safe_read_text(path: Path) -> str:
-    # Be resilient to weird encodings in corpora.
-    return path.read_text(encoding="utf-8", errors="ignore")
+    """Read a file and convert it to clean plain text based on its extension."""
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+    ext = path.suffix.lower()
+    if ext in {".html", ".htm"}:
+        return _strip_html(raw)
+    if ext == ".json":
+        return _parse_json(raw)
+    return raw
 
 
 def _infer_source_company_from_path(path: Path) -> str:
-    # Determine source by the *first directory under data/*.
-    # IMPORTANT: do not substring-match the repo root name "hackerrank", or
-    # everything will be mislabeled on Windows because the repo folder is
-    # ...\Desktop\hackerrank\...
+    """
+    Determine source company from the first directory under data/.
+    IMPORTANT: do NOT substring-match on the repo root path (which might also
+    contain "hackerrank" as the folder name on the developer's machine).
+    """
     try:
         rel = path.relative_to(DATA_DIR)
         if rel.parts:
@@ -45,7 +102,6 @@ def _infer_source_company_from_path(path: Path) -> str:
             return top
     except Exception:
         pass
-
     return "generic"
 
 
@@ -86,37 +142,44 @@ class CorpusRetriever:
 
     def load_and_index(self) -> None:
         debug_log(
-            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H1",
             location="retriever.py:load_and_index",
             message="Start corpus load/index",
             data={"model": self.model_name, "chunk_chars": self.chunk_chars, "overlap_chars": self.overlap_chars},
         )
         self._docs = self.load_corpus()
+
         # Source-company distribution sanity check
         counts: dict[str, int] = {}
         for d in self._docs:
             counts[d.source_company] = counts.get(d.source_company, 0) + 1
         debug_log(
-            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H6",
             location="retriever.py:load_and_index",
             message="Corpus docs by source_company",
             data={"counts": counts, "total": len(self._docs)},
         )
+
         self._chunks = self.chunk_documents(self._docs)
         self._embeddings = self.build_index(self._chunks)
         debug_log(
-            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H1",
             location="retriever.py:load_and_index",
             message="Finished corpus load/index",
-            data={"num_docs": len(self._docs), "num_chunks": len(self._chunks), "embeddings": None if self._embeddings is None else list(self._embeddings.shape)},
+            data={
+                "num_docs": len(self._docs),
+                "num_chunks": len(self._chunks),
+                "embeddings_shape": None if self._embeddings is None else list(self._embeddings.shape),
+            },
         )
 
     def load_corpus(self) -> list[CorpusDoc]:
         docs: list[CorpusDoc] = []
         if not DATA_DIR.exists():
+            print(f"[WARNING] data/ directory not found at {DATA_DIR}")
             return docs
 
         for path in DATA_DIR.rglob("*"):
@@ -124,7 +187,7 @@ class CorpusRetriever:
                 continue
             if path.suffix.lower() not in ALLOWED_EXTS:
                 continue
-            # Skip embedding cache artifacts (not part of support corpus)
+            # Skip embedding cache artifacts
             if path.name.startswith("embeddings_cache."):
                 continue
             if path.parent.name.lower() == "cache":
@@ -148,8 +211,8 @@ class CorpusRetriever:
     def chunk_documents(self, docs: Iterable[CorpusDoc]) -> list[Chunk]:
         chunks: list[Chunk] = []
         chunk_id = 0
-
         step = max(1, self.chunk_chars - self.overlap_chars)
+
         for d in docs:
             text = d.text
             n = len(text)
@@ -186,7 +249,6 @@ class CorpusRetriever:
         return chunks
 
     def _cache_paths(self) -> tuple[Path, Path]:
-        # Match plan.md cache location: data/embeddings_cache.npy
         emb_path = DATA_DIR / "embeddings_cache.npy"
         meta_path = DATA_DIR / "embeddings_cache.meta.json"
         return emb_path, meta_path
@@ -220,37 +282,39 @@ class CorpusRetriever:
                     emb = np.load(emb_path)
                     if isinstance(emb, np.ndarray) and emb.shape[0] == len(chunks):
                         debug_log(
-                            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+                            run_id=os.getenv("DEBUG_RUN_ID", "run"),
                             hypothesis_id="H1",
                             location="retriever.py:build_index",
                             message="Embedding cache hit",
-                            data={"emb_path": str(emb_path), "rows": int(emb.shape[0]), "dim": int(emb.shape[1]) if emb.ndim == 2 else None},
+                            data={"rows": int(emb.shape[0])},
                         )
+                        print(f"[retriever] Cache hit — loaded {emb.shape[0]} embeddings.")
                         return emb
             except Exception:
                 pass
+
+        print(f"[retriever] Building embedding index over {len(chunks)} chunks…")
         debug_log(
-            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H1",
             location="retriever.py:build_index",
             message="Embedding cache miss; recomputing",
-            data={"emb_path": str(emb_path), "meta_path": str(meta_path), "num_chunks": len(chunks)},
+            data={"num_chunks": len(chunks)},
         )
 
         if SentenceTransformer is None:
             raise RuntimeError(
-                "sentence-transformers is required for retrieval. "
-                "Install dependencies: pip install -r requirements.txt"
+                "sentence-transformers is required. Run: pip install -r requirements.txt"
             )
 
         self._model = SentenceTransformer(self.model_name)
         texts = [c.text for c in chunks]
-
         emb = self._model.encode(texts, batch_size=64, show_progress_bar=True, normalize_embeddings=True)
         emb = np.asarray(emb, dtype=np.float32)
 
         np.save(emb_path, emb)
         meta_path.write_text(json.dumps(meta_key), encoding="utf-8")
+        print(f"[retriever] Index built and cached to {emb_path}")
 
         return emb
 
@@ -261,7 +325,6 @@ class CorpusRetriever:
             raise RuntimeError("Retriever not indexed. Call load_and_index() first.")
         if not self._chunks:
             return []
-
         if SentenceTransformer is None:
             return []
 
@@ -271,9 +334,10 @@ class CorpusRetriever:
         q_emb = self._model.encode([query], normalize_embeddings=True)
         q_emb = np.asarray(q_emb, dtype=np.float32)
 
-        sims = cosine_similarity(q_emb, self._embeddings)[0]  # shape: (num_chunks,)
+        sims = cosine_similarity(q_emb, self._embeddings)[0]
         sims = sims.astype(np.float32, copy=False)
 
+        # Boost chunks from the known company corpus
         if company is not None:
             c = company.strip().lower()
             for i, ch in enumerate(self._chunks):
@@ -283,7 +347,6 @@ class CorpusRetriever:
         # Get top candidates
         k = min(max(1, top_k * 5), len(self._chunks))
         top_idx = np.argpartition(-sims, kth=k - 1)[:k]
-        # Sort by score desc
         top_idx = top_idx[np.argsort(-sims[top_idx])]
 
         results: list[dict] = []
@@ -301,29 +364,19 @@ class CorpusRetriever:
                 }
             )
 
-        if results:
-            debug_log(
-                run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
-                hypothesis_id="H2",
-                location="retriever.py:retrieve",
-                message="Retrieved chunks",
-                data={
-                    "company_boost": company,
-                    "top_score": float(results[0]["score"]),
-                    "kept": len(results),
-                    "top_source": results[0].get("source_company"),
-                    "top_file": results[0].get("filename"),
-                    "sources": [r.get("source_company") for r in results],
-                },
-            )
-        else:
-            debug_log(
-                run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
-                hypothesis_id="H2",
-                location="retriever.py:retrieve",
-                message="No chunks above threshold",
-                data={"company_boost": company, "min_score": self.min_score},
-            )
+        debug_log(
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
+            hypothesis_id="H2",
+            location="retriever.py:retrieve",
+            message="Retrieved chunks" if results else "No chunks above threshold",
+            data={
+                "company_boost": company,
+                "top_score": float(results[0]["score"]) if results else None,
+                "kept": len(results),
+                "top_source": results[0].get("source_company") if results else None,
+                "top_file": results[0].get("filename") if results else None,
+                "sources": [r.get("source_company") for r in results],
+            },
+        )
 
         return results
-

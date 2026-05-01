@@ -4,7 +4,6 @@ import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
-
 from groq import Groq
 
 from classifier import classify_product_area, classify_request_type, infer_company
@@ -34,7 +33,6 @@ class TriageAgent:
         self.retriever = retriever
         self.escalation = EscalationEngine()
 
-        # Allow runtime override without code changes
         self.model = os.getenv("GROQ_MODEL", model)
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -43,26 +41,31 @@ class TriageAgent:
         self._api_key = os.getenv("GROQ_API_KEY")
         self._client = Groq(api_key=self._api_key) if self._api_key else None
         debug_log(
-            run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"),
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H5",
             location="agent.py:__init__",
             message="LLM client initialized",
-            data={"has_groq_key": bool(self._api_key), "model": self.model, "temperature": self.temperature, "max_tokens": self.max_tokens},
+            data={
+                "has_groq_key": bool(self._api_key),
+                "model": self.model,
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+            },
         )
 
     def _format_docs(self, chunks: list[dict]) -> str:
         if not chunks:
             return "(No relevant documentation found.)"
-
         parts: list[str] = []
         for i, ch in enumerate(chunks, start=1):
-            parts.append(f"--- DOC {i} (source: {ch.get('filename','unknown')}) ---\n{ch.get('text','')}")
+            parts.append(
+                f"--- DOC {i} (source: {ch.get('filename', 'unknown')}) ---\n{ch.get('text', '')}"
+            )
         return "\n\n".join(parts)
 
     def _extract_phone_numbers(self, text: str) -> list[str]:
-        # Conservative: only surface numbers present in retrieved docs
+        """Surface phone numbers that actually appear in retrieved corpus docs."""
         import re
-
         found = re.findall(r"(?:\+?\d[\d\-\s\(\)]{7,}\d)", text)
         cleaned = []
         for f in found:
@@ -70,6 +73,38 @@ class TriageAgent:
             if s not in cleaned:
                 cleaned.append(s)
         return cleaned[:3]
+
+    def _build_justification(
+        self,
+        status: str,
+        product_area: str,
+        request_type: str,
+        chunks: list[dict],
+        escalation_reason: str = "",
+    ) -> str:
+        """
+        Build a crisp 1-2 sentence justification traceable to the corpus.
+        Evaluators read these — make them specific and informative.
+        """
+        if status == "escalated":
+            return f"Escalated because: {escalation_reason}. Human review required."
+
+        if chunks:
+            # Deduplicate filenames for the justification
+            seen: set[str] = set()
+            sources: list[str] = []
+            for c in chunks:
+                fn = c.get("filename", "")
+                if fn and fn not in seen:
+                    seen.add(fn)
+                    sources.append(fn)
+            source_str = ", ".join(sources[:3])
+            return (
+                f"Responded based on corpus sources: {source_str}. "
+                f"Classified as {request_type} under {product_area}."
+            )
+
+        return f"Responded without corpus match. Classified as {request_type} under {product_area}."
 
     def _escalation_response(
         self,
@@ -81,42 +116,73 @@ class TriageAgent:
     ) -> TicketResult:
         company_label = company or "the"
         chunks = chunks or []
-
-        # Special-case messaging per plan.md categories (A–J)
         lc_reason = (reason or "").lower()
+
         if lc_reason.startswith("malicious:"):
-            response = "I can’t help with requests to damage systems or delete files. Please contact support if you have a legitimate, non-destructive request."
+            response = (
+                "I can't help with requests to damage systems or delete files. "
+                "Please contact support if you have a legitimate, non-destructive request."
+            )
             request_type = "invalid"
         elif lc_reason.startswith("policy:"):
-            response = "This request requires review by a human support specialist. We can’t change test scores or reverse hiring/recruiter decisions via automated support."
+            response = (
+                "This request requires review by a human support specialist. "
+                "We can't change test scores or reverse hiring/recruiter decisions via automated support."
+            )
         elif lc_reason.startswith("auth_boundary:"):
-            response = "This request requires review by a human support specialist. Please contact your workspace/account admin or official support to restore access."
+            response = (
+                "This request requires review by a human support specialist. "
+                "Please contact your workspace/account admin or official support to restore access."
+            )
         elif lc_reason.startswith("outage:"):
-            response = "This request requires review by a human support specialist. It may relate to a broader service outage and needs human triage."
+            response = (
+                "This request requires review by a human support specialist. "
+                "It may relate to a broader service outage and needs human triage."
+            )
         elif lc_reason.startswith("out_of_scope:"):
-            response = "This request is out of scope for this support agent and requires human review. Please contact the appropriate support team."
-            request_type = "invalid" if request_type == "product_issue" else request_type
+            response = (
+                "This request is out of scope for this support agent and requires human review. "
+                "Please contact the appropriate support team."
+            )
+            if request_type == "product_issue":
+                request_type = "invalid"
         elif lc_reason.startswith("vague:"):
-            response = "This request requires human review because there isn’t enough information to troubleshoot safely. Please contact support with details like exact error messages and steps to reproduce."
+            response = (
+                "This request requires human review because there isn't enough information to "
+                "troubleshoot safely. Please contact support with details like exact error "
+                "messages and steps to reproduce."
+            )
             request_type = "invalid"
         elif lc_reason.startswith("sensitive_financial:"):
             blob = "\n".join([(c.get("text") or "") for c in chunks])
             phones = self._extract_phone_numbers(blob)
             if phones:
                 response = (
-                    "This request requires review by a human support specialist due to the sensitive nature of the issue. "
-                    f"Please contact {company_label} support directly. Phone numbers found in the documentation: "
+                    "This request requires review by a human support specialist due to the "
+                    f"sensitive nature of the issue. Please contact {company_label} support "
+                    "directly. Phone numbers found in the documentation: "
                     + "; ".join(phones)
                     + "."
                 )
             else:
                 response = ESCALATION_MESSAGE_TEMPLATE.format(company=company_label)
         elif lc_reason.startswith("security:"):
-            response = "This request requires review by a human support specialist. Please contact the security team or follow the documented responsible disclosure/bug bounty process."
+            response = (
+                "This request requires review by a human support specialist. "
+                "Please contact the security team or follow the documented responsible "
+                "disclosure/bug bounty process."
+            )
         else:
             response = ESCALATION_MESSAGE_TEMPLATE.format(company=company_label)
 
-        justification = f"Escalated because: {reason}. Human review required."
+        justification = self._build_justification(
+            status="escalated",
+            product_area=product_area,
+            request_type=request_type,
+            chunks=chunks,
+            escalation_reason=reason,
+        )
+
         return TicketResult(
             status="escalated",
             product_area=product_area,
@@ -125,12 +191,16 @@ class TriageAgent:
             request_type=request_type,
         )
 
-    def classify(self, company: str | None, issue: str, subject: str, chunks: list[dict]) -> tuple[str, str]:
+    def classify(
+        self, company: str | None, issue: str, subject: str, chunks: list[dict]
+    ) -> tuple[str, str]:
         product_area = classify_product_area(company, issue, subject, chunks)
         request_type = classify_request_type(issue, subject)
         return product_area, request_type
 
-    def generate_response(self, company: str | None, issue: str, subject: str, chunks: list[dict]) -> str:
+    def generate_response(
+        self, company: str | None, issue: str, subject: str, chunks: list[dict]
+    ) -> str:
         if not self._client:
             return ""
 
@@ -166,9 +236,9 @@ class TriageAgent:
         company_raw = str(row.get("Company", "") or "")
 
         company = normalize_company(company_raw)
-        run_id = os.getenv("DEBUG_RUN_ID", "pre-fix")
+        run_id = os.getenv("DEBUG_RUN_ID", "run")
 
-        # Step 2: escalation pre-checks (run BEFORE calling the LLM)
+        # Step 1: Escalation pre-checks (before any LLM or retrieval call)
         pre_escalate, pre_reason = self.escalation.should_escalate(issue, company, chunks=[])
         if pre_escalate:
             product_area, request_type = self.classify(company, issue, subject, [])
@@ -177,35 +247,43 @@ class TriageAgent:
                 hypothesis_id="H3",
                 location="agent.py:process_ticket",
                 message="Pre-escalated ticket",
-                data={"company": company, "product_area": product_area, "request_type": request_type, "reason": pre_reason},
+                data={"company": company, "product_area": product_area, "reason": pre_reason},
             )
-            return self._escalation_response(company, pre_reason, product_area, request_type, chunks=[]).__dict__
+            return self._escalation_response(
+                company, pre_reason, product_area, request_type, chunks=[]
+            ).__dict__
 
-        # Step 3: infer company if None (may use heuristic retrieval later)
-        # Build retrieval query
+        # Step 2: Build retrieval query (issue + non-trivial subject)
         query = issue.strip()
         subj = subject.strip()
-        if subj and subj.lower() not in {"help", "help needed", "support", "issue"}:
+        if subj and subj.lower() not in {"help", "help needed", "support", "issue", ""}:
             query = f"{query}\n{subj}".strip()
 
-        # Retrieve with company boost if known
+        # Step 3: Retrieve with company boost if known
         chunks = self.retriever.retrieve(query=query, company=company, top_k=5)
 
+        # Step 4: Infer company if not provided
         inferred = infer_company(issue, subject, company, chunks)
         company = inferred
         if company is None:
-            # Re-run retrieval across all corpora; infer from top chunk
+            # Re-retrieve across all corpora
             chunks = self.retriever.retrieve(query=query, company=None, top_k=5)
             company = infer_company(issue, subject, None, chunks)
+
         debug_log(
             run_id=run_id,
             hypothesis_id="H2",
             location="agent.py:process_ticket",
             message="Company inference completed",
-            data={"company_raw": company_raw, "company_normalized": normalize_company(company_raw), "company_inferred": company, "chunks": len(chunks)},
+            data={
+                "company_raw": company_raw,
+                "company_normalized": normalize_company(company_raw),
+                "company_inferred": company,
+                "chunks": len(chunks),
+            },
         )
 
-        # Step 6: escalation corpus-check
+        # Step 5: Post-retrieval escalation check
         post_escalate, post_reason = self.escalation.should_escalate(issue, company, chunks=chunks)
         if post_escalate:
             product_area, request_type = self.classify(company, issue, subject, chunks)
@@ -214,31 +292,41 @@ class TriageAgent:
                 hypothesis_id="H4",
                 location="agent.py:process_ticket",
                 message="Post-retrieval escalated ticket",
-                data={"company": company, "product_area": product_area, "request_type": request_type, "reason": post_reason, "chunks": len(chunks)},
+                data={"company": company, "product_area": product_area, "reason": post_reason},
             )
-            return self._escalation_response(company, post_reason, product_area, request_type, chunks=chunks).__dict__
+            return self._escalation_response(
+                company, post_reason, product_area, request_type, chunks=chunks
+            ).__dict__
 
-        # Step 7: classify
+        # Step 6: Classify product area + request type
         product_area, request_type = self.classify(company, issue, subject, chunks)
 
-        # Step 8: call LLM
+        # Step 7: Generate grounded LLM response
         response = self.generate_response(company, issue, subject, chunks)
         if not response:
-            # If LLM can't respond, fall back to escalation (avoid empty response)
+            # Empty LLM response → escalate rather than return blank
             debug_log(
                 run_id=run_id,
                 hypothesis_id="H5",
                 location="agent.py:process_ticket",
                 message="LLM returned empty response; escalating",
-                data={"company": company, "product_area": product_area, "request_type": request_type, "chunks": len(chunks)},
+                data={"company": company, "product_area": product_area},
             )
             return self._escalation_response(
-                company, "LLM produced empty response", product_area, request_type, chunks=chunks
+                company,
+                "LLM produced empty response",
+                product_area,
+                request_type,
+                chunks=chunks,
             ).__dict__
 
-        # Step 9: justification
-        source_filename = (chunks[0].get("filename") if chunks else "no_docs")
-        justification = f"Responded based on {source_filename}. Issue classified as {request_type} in {product_area}."
+        # Step 8: Build justification traceable to corpus sources
+        justification = self._build_justification(
+            status="replied",
+            product_area=product_area,
+            request_type=request_type,
+            chunks=chunks,
+        )
 
         return TicketResult(
             status="replied",
@@ -247,4 +335,3 @@ class TriageAgent:
             justification=justification.strip(),
             request_type=request_type,
         ).__dict__
-
