@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import re
+
 import pandas as pd
 
 # Debug-mode log file (NDJSON)
@@ -77,6 +79,49 @@ def normalize_company(raw: str) -> str | None:
     if not s or s.lower() == "none":
         return None
     return s.strip().lower()
+
+
+_MD_LINK_RE = re.compile(r"\[(.+?)\]\(.+?\)")
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
+_MD_ITALIC_RE = re.compile(r"\*(.+?)\*|_(.+?)_")
+_MD_CODE_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+_MD_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_MD_HEADING_RE = re.compile(r"^#{1,6}\s+", flags=re.MULTILINE)
+_MD_BULLET_RE = re.compile(r"^[-*]\s+", flags=re.MULTILINE)
+_MD_NUMBERED_RE = re.compile(r"^\d+\.\s+", flags=re.MULTILINE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def sanitize_plaintext(text: str) -> str:
+    """
+    Strips common markdown and HTML formatting, then collapses excessive whitespace.
+    Converts [label](url) to label.
+    Removes bold/italic markers, code fences, backticks, headings, list bullets, numbered lists, and HTML tags.
+    Collapses runs of blank lines to a single blank line.
+    """
+    if not text:
+        return ""
+    # Remove code blocks first (multiline)
+    text = _MD_CODE_BLOCK_RE.sub("", text)
+    # Convert inline code to plain text
+    text = _MD_INLINE_CODE_RE.sub(r"\1", text)
+    # Convert links to just the label
+    text = _MD_LINK_RE.sub(r"\1", text)
+    # Remove bold formatting (keep the content)
+    text = _MD_BOLD_RE.sub(r"\1\2", text)
+    # Remove italic formatting (keep the content)
+    text = _MD_ITALIC_RE.sub(r"\1\2", text)
+    # Remove headings
+    text = _MD_HEADING_RE.sub("", text)
+    # Remove list bullets
+    text = _MD_BULLET_RE.sub("", text)
+    # Remove numbered lists
+    text = _MD_NUMBERED_RE.sub("", text)
+    # Remove HTML tags
+    text = _HTML_TAG_RE.sub("", text)
+    # Collapse excessive blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def debug_log(

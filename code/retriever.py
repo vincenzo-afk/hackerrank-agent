@@ -257,8 +257,10 @@ class CorpusRetriever:
     def retrieve(self, query: str, company: str | None = None, top_k: int = 5) -> list[dict]:
         if not query or not query.strip():
             return []
-        if self._embeddings is None or not self._chunks:
+        if self._embeddings is None:
             raise RuntimeError("Retriever not indexed. Call load_and_index() first.")
+        if not self._chunks:
+            return []
 
         if SentenceTransformer is None:
             return []

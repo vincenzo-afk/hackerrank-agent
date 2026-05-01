@@ -83,16 +83,34 @@ def classify_product_area(company: str | None, issue: str, subject: str, retriev
     return "general_support"
 
 
+_TRIVIAL_PATTERNS = [
+    "thank you for helping me",
+    "hi there",
+    "hello",
+    "thanks",
+    "thank you",
+]
+
+
 def classify_request_type(issue: str, subject: str) -> str:
     text = f"{subject or ''}\n{issue or ''}".lower()
 
     if any(k in text for k in ["delete all files", "rm -rf", "format disk", "wipe drive"]):
         return "invalid"
 
-    if any(k in text for k in ["feature request", "can you add", "would be great if", "suggest", "request a feature"]):
+    # Trivial / non-actionable greetings
+    stripped = " ".join(text.split())
+    if any(stripped == t or stripped.startswith(t + " ") for t in _TRIVIAL_PATTERNS):
+        return "invalid"
+
+    # Infosec / form-filling / LTI setup / hiring-process requests are feature-like scope asks
+    if any(k in text for k in ["infosec", "fill in the forms", "setup a claude lti key", "claude lti key", "infosec forms", "hiring process", "onboarding forms"]):
         return "feature_request"
 
-    if any(k in text for k in ["bug", "glitch", "unexpected", "crash", "crashes"]):
+    if any(k in text for k in ["feature request", "can you add", "would be great if", "suggest", "request a feature", "add support for", "implement", "extend"]):
+        return "feature_request"
+
+    if any(k in text for k in ["bug", "glitch", "unexpected", "crash", "crashes", "site is down", "is down", "pages are inaccessible"]):
         return "bug"
 
     if any(k in text for k in ["not working", "can't", "cannot", "stopped", "error", "broken", "lost access", "failing"]):

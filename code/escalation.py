@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 
 import os
 
@@ -29,11 +28,11 @@ _SECURITY_REPORT_PATTERNS = [
 ]
 
 _IDENTITY_THEFT_PATTERNS = [
-    r"\b(identity theft|my identity was stolen)\b",
+    r"\b(identity theft|my identity has been stolen|my identity was stolen)\b",
 ]
 
 _FRAUD_PATTERNS = [
-    r"\b(fraud|fraudulent|stolen card|lost card|unauthorized transaction)\b",
+    r"\b(fraud|fraudulent|stolen card|lost card|card was stolen|card has been stolen|unauthorized transaction)\b",
 ]
 
 _NON_OWNER_ACCESS_PATTERNS = [
@@ -42,9 +41,10 @@ _NON_OWNER_ACCESS_PATTERNS = [
 ]
 
 _SCORE_MANIPULATION_PATTERNS = [
-    r"\b(change my score|update my score|fix my score)\b",
+    r"\b(change my score|update my score|fix my score|score dispute|increase my score)\b",
     r"\b(reverse (the )?(decision|result))\b",
-    r"\brecruiter\b.*\b(reverse|change)\b",
+    r"\brecruiter\b.*\b(reverse|change|rejected|move me)\b",
+    r"\b(graded me unfairly|must have graded me)\b",
 ]
 
 _OUTAGE_PATTERNS = [
@@ -58,6 +58,24 @@ _SENSITIVE_TOPICS = [
     r"\b(legal|lawyer|gdpr|compliance)\b",
 ]
 
+_URGENT_CASH_PATTERNS = [
+    r"\burgent cash\b",
+    r"\bneed cash\b",
+    r"\bonly the visa card\b",
+    r"\bneed.*cash.*right now\b",
+]
+
+_DEMAND_ACTION_PATTERNS = [
+    r"\b(refund me|ban the seller|block the merchant|make visa refund|chargeback|reverse the charge)\b",
+]
+
+_VISA_FAQ_PATTERNS = [
+    r"\bhow do i (dispute a charge|log in to my account|find an atm)\b",
+    r"\bwhat should i do if my visa card has been lost or stolen\b",
+    r"\bwhere can i report a lost or stolen visa card\b",
+    r"\bwhy was my card declined\b",
+]
+
 _NON_ENGLISH_HINTS = [
     r"[àâçéèêëîïôùûüÿœæ]",
     r"\b(bonjour|merci|svp|s'il vous plaît|je veux|affiche)\b",
@@ -69,12 +87,6 @@ def _matches_any(patterns: list[str], text: str) -> bool:
         if re.search(pat, text, flags=re.IGNORECASE | re.DOTALL):
             return True
     return False
-
-
-@dataclass(frozen=True)
-class EscalationResult:
-    escalated: bool
-    reason: str
 
 
 class EscalationEngine:
@@ -123,18 +135,34 @@ class EscalationEngine:
             debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: outage", data={"company": company, "reason": res[1]})
             return res
 
-        # Security / bug bounty reports: prefer routing; only allow reply if corpus covers it
-        if _matches_any(_SECURITY_REPORT_PATTERNS, text):
-            if not chunks:
-                res = (True, "security: vulnerability report without supporting documentation")
-                debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: security no docs", data={"company": company, "reason": res[1]})
-                return res
-            blob = "\n".join([(c.get("text") or "") for c in chunks]).lower()
-            if any(k in blob for k in ["bug bounty", "security report", "responsible disclosure", "security@", "vulnerability"]):
-                return False, ""
-            res = (True, "security: vulnerability report not covered by documentation")
-            debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: security uncovered", data={"company": company, "reason": res[1]})
+        # Urgent-cash / card-only = high-risk financial (Plan.md Category G)
+        if _matches_any(_URGENT_CASH_PATTERNS, text):
+            res = (True, "sensitive_financial: urgent cash request needs human review")
+            debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: urgent cash", data={"company": company, "reason": res[1]})
             return res
+
+        # Aggressive demands for refunds/bans/chargebacks from Visa need human review
+        if _matches_any(_DEMAND_ACTION_PATTERNS, text):
+            res = (True, "sensitive_financial: user demands refund, chargeback, or merchant action requiring human review")
+            debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: demand action", data={"company": company, "reason": res[1]})
+            return res
+
+        # Known Visa FAQ questions should be answered from corpus, not escalated
+        if company == "visa" and _matches_any(_VISA_FAQ_PATTERNS, text):
+            return False, ""
+
+        # Security / bug bounty reports: prefer routing; only allow reply if corpus covers it.
+        # When called pre-retrieval (chunks empty) we defer the decision so the agent can
+        # retrieve docs first and then re-evaluate in the post-retrieval check.
+        if _matches_any(_SECURITY_REPORT_PATTERNS, text):
+            if chunks:
+                blob = "\n".join([(c.get("text") or "") for c in chunks]).lower()
+                if any(k in blob for k in ["bug bounty", "security report", "responsible disclosure", "security@", "vulnerability"]):
+                    return False, ""
+                res = (True, "security: vulnerability report not covered by documentation")
+                debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: security uncovered", data={"company": company, "reason": res[1]})
+                return res
+            # Defer until post-retrieval when we have chunks to inspect.
 
         # 5.1 out-of-scope with no corpus match (only when company is unknown)
         if company is None and (not chunks):

@@ -11,7 +11,7 @@ from classifier import classify_product_area, classify_request_type, infer_compa
 from escalation import EscalationEngine
 from prompts import ESCALATION_MESSAGE_TEMPLATE, RESPONSE_PROMPT_TEMPLATE, SYSTEM_PROMPT
 from retriever import CorpusRetriever
-from utils import debug_log, normalize_company
+from utils import debug_log, normalize_company, sanitize_plaintext
 
 
 @dataclass(frozen=True)
@@ -98,6 +98,7 @@ class TriageAgent:
             request_type = "invalid" if request_type == "product_issue" else request_type
         elif lc_reason.startswith("vague:"):
             response = "This request requires human review because there isn’t enough information to troubleshoot safely. Please contact support with details like exact error messages and steps to reproduce."
+            request_type = "invalid"
         elif lc_reason.startswith("sensitive_financial:"):
             blob = "\n".join([(c.get("text") or "") for c in chunks])
             phones = self._extract_phone_numbers(blob)
@@ -157,7 +158,7 @@ class TriageAgent:
         except Exception:
             content = None
 
-        return (content or "").strip()
+        return sanitize_plaintext(content or "")
 
     def process_ticket(self, row) -> dict:
         issue = str(row.get("Issue", "") or "")
@@ -223,7 +224,7 @@ class TriageAgent:
         # Step 8: call LLM
         response = self.generate_response(company, issue, subject, chunks)
         if not response:
-            # If Claude can't respond, fall back to escalation (avoid empty response)
+            # If LLM can't respond, fall back to escalation (avoid empty response)
             debug_log(
                 run_id=run_id,
                 hypothesis_id="H5",
@@ -242,7 +243,7 @@ class TriageAgent:
         return TicketResult(
             status="replied",
             product_area=product_area,
-            response=response.strip(),
+            response=sanitize_plaintext(response),
             justification=justification.strip(),
             request_type=request_type,
         ).__dict__
