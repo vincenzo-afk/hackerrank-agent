@@ -55,7 +55,17 @@ _OUTAGE_PATTERNS = [
 _SENSITIVE_TOPICS = [
     r"\b(billing|refund|chargeback|payment dispute|dispute)\b",
     r"\b(account deletion|delete my account|close my account)\b",
-    r"\b(legal|lawyer|gdpr|compliance)\b",
+    r"\b(legal|lawyer|gdpr|compliance|sue you|legal action|attorney)\b",
+]
+
+_PII_PATTERNS = [
+    r"\b(ssn|social security number|passport|national insurance|dob|date of birth)\b",
+    r"\b\d{3}-\d{2}-\d{4}\b", # US SSN
+]
+
+_HARM_DISCRIMINATION_PATTERNS = [
+    r"\b(suicide|kill myself|harm myself|end my life)\b",
+    r"\b(racist|sexist|homophobic|discriminate|discrimination|harassment)\b",
 ]
 
 _URGENT_CASH_PATTERNS = [
@@ -139,6 +149,16 @@ class EscalationEngine:
         if _matches_any(_URGENT_CASH_PATTERNS, text):
             res = (True, "sensitive_financial: urgent cash request needs human review")
             debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: urgent cash", data={"company": company, "reason": res[1]})
+            return res
+
+        if _matches_any(_PII_PATTERNS, text):
+            res = (True, "privacy: contains highly sensitive PII")
+            debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: PII detected", data={"company": company, "reason": res[1]})
+            return res
+
+        if _matches_any(_HARM_DISCRIMINATION_PATTERNS, text):
+            res = (True, "safety: self-harm, harassment, or discrimination reported")
+            debug_log(run_id=os.getenv("DEBUG_RUN_ID", "pre-fix"), hypothesis_id="H3", location="escalation.py:should_escalate", message="Escalate: harm/discrimination", data={"company": company, "reason": res[1]})
             return res
 
         # Aggressive demands for refunds/bans/chargebacks from Visa need human review

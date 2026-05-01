@@ -34,8 +34,8 @@ class TriageAgent:
         self.escalation = EscalationEngine()
 
         self.model = os.getenv("GROQ_MODEL", model)
-        self.temperature = temperature
-        self.max_tokens = max_tokens
+        self.temperature = float(os.getenv("GROQ_TEMPERATURE", temperature))
+        self.max_tokens = int(os.getenv("GROQ_MAX_TOKENS", max_tokens))
 
         load_dotenv()
         self._api_key = os.getenv("GROQ_API_KEY")

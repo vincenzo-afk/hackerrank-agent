@@ -130,10 +130,10 @@ class CorpusRetriever:
         overlap_chars: int = 200,
         min_score: float = 0.25,
     ) -> None:
-        self.model_name = model_name
-        self.chunk_chars = chunk_chars
-        self.overlap_chars = overlap_chars
-        self.min_score = min_score
+        self.model_name = os.getenv("EMBEDDING_MODEL", model_name)
+        self.chunk_chars = int(os.getenv("CHUNK_CHARS", chunk_chars))
+        self.overlap_chars = int(os.getenv("OVERLAP_CHARS", overlap_chars))
+        self.min_score = float(os.getenv("MIN_SCORE", min_score))
 
         self._model = None
         self._docs: list[CorpusDoc] = []
@@ -214,12 +214,18 @@ class CorpusRetriever:
     def chunk_documents(self, docs: Iterable[CorpusDoc]) -> list[Chunk]:
         chunks: list[Chunk] = []
         chunk_id = 0
-        step = max(1, self.chunk_chars - self.overlap_chars)
-
+        
         for d in docs:
             text = d.text
-            n = len(text)
-            if n <= self.chunk_chars:
+            words = text.split()
+            n_words = len(words)
+            
+            # Estimate words per chunk (~5 chars per word)
+            words_per_chunk = max(10, self.chunk_chars // 5)
+            words_overlap = max(5, self.overlap_chars // 5)
+            step = max(1, words_per_chunk - words_overlap)
+
+            if n_words <= words_per_chunk:
                 chunks.append(
                     Chunk(
                         text=text,
@@ -232,21 +238,23 @@ class CorpusRetriever:
                 chunk_id += 1
                 continue
 
-            for start in range(0, n, step):
-                end = min(n, start + self.chunk_chars)
-                chunk_text = text[start:end]
+            for start_word in range(0, n_words, step):
+                end_word = min(n_words, start_word + words_per_chunk)
+                chunk_text = " ".join(words[start_word:end_word])
                 if chunk_text.strip():
+                    # Approximate char_start
+                    char_start = sum(len(w) + 1 for w in words[:start_word])
                     chunks.append(
                         Chunk(
                             text=chunk_text,
                             chunk_id=chunk_id,
                             source_company=d.source_company,
                             filename=d.filename,
-                            char_start=start,
+                            char_start=char_start,
                         )
                     )
                     chunk_id += 1
-                if end >= n:
+                if end_word >= n_words:
                     break
 
         return chunks

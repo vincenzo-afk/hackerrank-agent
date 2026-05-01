@@ -143,28 +143,11 @@ def _wrap(text: str, width: int = 72, indent: str = "    ") -> str:
 
 
 def _print_reply(result: dict, idx: int) -> None:
-    status = result.get("status", "?")
-    area = result.get("product_area", "?")
-    rtype = result.get("request_type", "?")
     response = result.get("response", "")
-    justification = result.get("justification", "")
-
-    if status == "replied":
-        badge = green_bg(" REPLIED ")
-        area_col = green(area)
-    else:
-        badge = red_bg(" ESCALATED ")
-        area_col = red(area)
-
+    
     print()
-    print(f"  {badge}  {dim(f'#{idx}')}  {area_col}  {dim('·')}  {dim(rtype)}")
-    print(f"  {dim('─' * 60)}")
-    # Response
+    print(f"  {bold(green('Agent'))}  {dim('›')}")
     print(_wrap(response))
-    # Justification (dim)
-    if justification:
-        print()
-        print(_wrap(dim(f"ℹ  {justification}")))
     print()
 
 
