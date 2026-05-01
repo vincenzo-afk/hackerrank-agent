@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Interactive CLI Chat Agent — HackerRank Orchestrate
-=====================================================
+====================================================
 Run:  python code/chat.py
       python code/chat.py --company hackerrank   # pre-set company context
+      python code/chat.py --reindex              # force rebuild embedding cache
 """
 from __future__ import annotations
 
@@ -40,9 +41,16 @@ def red(t: str) -> str:       return _c("31", t)
 def magenta(t: str) -> str:   return _c("35", t)
 def blue(t: str) -> str:      return _c("34", t)
 def white_bg(t: str) -> str:  return _c("47;30", t)
-def cyan_bg(t: str) -> str:   return _c("46;30", t)
-def green_bg(t: str) -> str:  return _c("42;30", t)
-def red_bg(t: str) -> str:    return _c("41;37", t)
+
+
+COMPANY_COLOURS = {
+    "hackerrank": green,
+    "claude": magenta,
+    "visa": blue,
+    None: dim,
+}
+
+VALID_COMPANIES = {"hackerrank", "claude", "visa"}
 
 
 # ---------------------------------------------------------------------------
@@ -65,71 +73,60 @@ class Spinner:
         self._stop.set()
         if self._thread:
             self._thread.join()
-        # Erase the spinner line
-        sys.stdout.write("\r" + " " * (len(self._label) + 6) + "\r")
+        sys.stdout.write("\r" + " " * (len(self._label) + 8) + "\r")
         sys.stdout.flush()
-
 
     def _spin(self) -> None:
         i = 0
         while not self._stop.is_set():
             frame = self._FRAMES[i % len(self._FRAMES)]
-            sys.stdout.write(f"\r  {cyan(frame)} {dim(self._label)}…  ")
+            sys.stdout.write(f"\r  {cyan(frame)} {dim(self._label + '…')}  ")
             sys.stdout.flush()
             time.sleep(0.1)
             i += 1
 
 
 # ---------------------------------------------------------------------------
-# Pretty banner
+# Banner
 # ---------------------------------------------------------------------------
 BANNER = f"""
-{cyan('╔══════════════════════════════════════════════════════════╗')}
-{cyan('║')}  {bold(white_bg('  HackerRank Orchestrate — Support Triage Chat Agent  '))}  {cyan('║')}
-{cyan('║')}  Domains: {green('HackerRank')} · {magenta('Claude')} · {blue('Visa')}                          {cyan('║')}
-{cyan('╠══════════════════════════════════════════════════════════╣')}
-{cyan('║')}  {dim('Type your support question and press Enter.')}              {cyan('║')}
-{cyan('║')}  {dim('Commands:')} {yellow('help')} · {yellow('clear')} · {yellow('history')} · {yellow('company <name>')} · {yellow('quit')}  {cyan('║')}
-{cyan('╚══════════════════════════════════════════════════════════╝')}
+{cyan('╔═══════════════════════════════════════════════════╗')}
+{cyan('║')}  {bold('HackerRank Orchestrate — Support Chat')}            {cyan('║')}
+{cyan('║')}  {dim('Domains:')} {green('HackerRank')} · {magenta('Claude')} · {blue('Visa')}               {cyan('║')}
+{cyan('║')}  {dim('Type')} {yellow('help')} {dim('for commands or just ask a question.')}  {cyan('║')}
+{cyan('╚═══════════════════════════════════════════════════╝')}
 """
-
 
 HELP_TEXT = f"""
-{bold(cyan('Available commands:'))}
-  {yellow('help')}              Show this help message
-  {yellow('clear')}             Clear the screen
-  {yellow('history')}           Show conversation history
-  {yellow('company <name>')}    Set company context (hackerrank / claude / visa / none)
-  {yellow('quit')} / {yellow('exit')}      Exit the agent
+{bold(cyan('Commands'))}
+  {yellow('help')}                     Show this help message
+  {yellow('clear')}                    Clear the screen
+  {yellow('history')}                  Show conversation history
+  {yellow('company')}                  Show current company context
+  {yellow('company <name>')}           Set company (hackerrank / claude / visa / none)
+  {yellow('quit')} / {yellow('exit')}              Exit the agent
 
-{bold(cyan('How it works:'))}
-  Type any support question. The agent will:
-  • Retrieve relevant documentation from the local corpus
-  • Classify the request (product_area, request_type)
-  • Either reply with a grounded answer or escalate to a human
+{bold(cyan('How to use'))}
+  Just type your support question and press Enter.
+  The agent will retrieve relevant docs and reply conversationally.
 
-{bold(cyan('Status indicators:'))}
-  {green_bg(' REPLIED ')}    Answer generated from corpus
-  {red_bg(' ESCALATED ')}  Requires human support specialist
+{bold(cyan('Company context'))}
+  Setting a company helps the agent retrieve more targeted answers.
+  If not set, the agent will auto-detect from your question.
 """
 
-COMPANY_COLOURS = {
-    "hackerrank": green,
-    "claude": magenta,
-    "visa": blue,
-    None: dim,
-}
 
 # ---------------------------------------------------------------------------
-# Format helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _company_label(company: str | None) -> str:
-    fn = COMPANY_COLOURS.get(str(company).lower() if company else None, dim)
-    return fn(f"[{company or 'unknown'}]") if company else dim("[no company]")
+    fn = COMPANY_COLOURS.get(company, dim)
+    return fn(f"[{company}]") if company else dim("[auto]")
 
 
 def _wrap(text: str, width: int = 72, indent: str = "    ") -> str:
+    """Wrap long text at word boundaries, preserving blank lines."""
     lines = text.splitlines()
     out: list[str] = []
     for line in lines:
@@ -142,28 +139,27 @@ def _wrap(text: str, width: int = 72, indent: str = "    ") -> str:
     return "\n".join(out)
 
 
-def _print_reply(result: dict, idx: int) -> None:
-    response = result.get("response", "")
-    
-    print()
-    print(f"  {bold(green('Agent'))}  {dim('›')}")
+def _print_user_turn(text: str, company: str | None) -> None:
+    label = _company_label(company)
+    print(f"\n  {bold(cyan('You'))} {label}")
+    print(f"  {dim('›')} {text}\n")
+
+
+def _print_agent_turn(response: str, escalated: bool) -> None:
+    prefix = bold(red("Agent")) if escalated else bold(green("Agent"))
+    print(f"  {prefix}")
     print(_wrap(response))
     print()
 
 
-def _print_user(text: str, company: str | None) -> None:
-    label = _company_label(company)
-    print(f"\n  {bold(cyan('You'))} {label}  {dim('›')}  {text}")
-
-
 # ---------------------------------------------------------------------------
-# Main ChatSession
+# ChatSession
 # ---------------------------------------------------------------------------
 
 class ChatSession:
     def __init__(self, preset_company: str | None = None) -> None:
         self.company_override: str | None = preset_company
-        self.history: list[dict] = []   # {role, text, result}
+        self.history: list[dict] = []
         self._turn = 0
         self._retriever = None
         self._agent = None
@@ -173,133 +169,128 @@ class ChatSession:
     # ------------------------------------------------------------------
 
     def boot(self, force_reindex: bool = False) -> None:
-        """Load corpus and initialise agent (shown once at startup)."""
         load_dotenv()
 
-        # Dynamic import so we only pay for it once
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from retriever import CorpusRetriever
         from agent import TriageAgent
 
         print(f"\n  {dim('Loading corpus and building embedding index…')}")
-        if not force_reindex:
-            print(f"  {dim('(This takes ~20 min on first run; subsequent runs use the cache.)')}")
+        if force_reindex:
+            print(f"  {yellow('!')} {dim('Force reindex — this will take several minutes.')}")
         else:
-            print(f"  {yellow('!')} {dim('Force reindexing enabled. This will take ~20 minutes.')}")
+            print(f"  {dim('(Cached index loads in seconds. Use --reindex to rebuild.)')}")
         print()
 
         spinner = Spinner("Indexing corpus")
         spinner.start()
-
         try:
             self._retriever = CorpusRetriever()
             self._retriever.load_and_index(force_reindex=force_reindex)
             self._agent = TriageAgent(self._retriever)
+        except Exception as e:
+            spinner.stop()
+            print(f"\n  {red('✗')} Failed to boot: {e}\n")
+            sys.exit(1)
         finally:
             spinner.stop()
 
-        print(f"  {green('✓')} Corpus indexed.  {dim('Type')} {yellow('help')} {dim('for commands.')}\n")
+        print(f"  {green('✓')} Ready. {dim('Type')} {yellow('help')} {dim('for commands.')}\n")
 
     # ------------------------------------------------------------------
-    # Command dispatch
+    # Commands
     # ------------------------------------------------------------------
 
-    def _cmd_help(self, _: str) -> bool:
+    def _cmd_help(self) -> None:
         print(HELP_TEXT)
-        return True
 
-    def _cmd_clear(self, _: str) -> bool:
+    def _cmd_clear(self) -> None:
         os.system("clear" if os.name != "nt" else "cls")
         print(BANNER)
-        return True
 
-    def _cmd_history(self, _: str) -> bool:
+    def _cmd_history(self) -> None:
         if not self.history:
-            print(f"\n  {dim('No conversation history yet.')}\n")
-            return True
+            print(f"\n  {dim('No history yet.')}\n")
+            return
         print(f"\n  {bold('Conversation history')} ({len(self.history)} turns)\n")
         for i, h in enumerate(self.history, 1):
-            role = "You" if h["role"] == "user" else "Agent"
-            label = bold(cyan(role)) if h["role"] == "user" else bold(green(role))
-            print(f"  [{i}] {label}: {h['text'][:100]}{'…' if len(h['text']) > 100 else ''}")
+            role = bold(cyan("You")) if h["role"] == "user" else bold(green("Agent"))
+            snippet = h["text"][:90] + ("…" if len(h["text"]) > 90 else "")
+            print(f"  {dim(f'[{i}]')} {role}  {snippet}")
         print()
-        return True
 
-    def _cmd_company(self, arg: str) -> bool:
+    def _cmd_company(self, arg: str) -> None:
         arg = arg.strip().lower()
         if arg in {"none", "reset", "clear", ""}:
             self.company_override = None
-            print(f"\n  {green('✓')} Company context cleared. Agent will auto-detect.\n")
-        elif arg in {"hackerrank", "claude", "visa"}:
+            print(f"\n  {green('✓')} Company context cleared — agent will auto-detect.\n")
+        elif arg in VALID_COMPANIES:
             self.company_override = arg
             fn = COMPANY_COLOURS.get(arg, dim)
             print(f"\n  {green('✓')} Company set to {fn(arg)}.\n")
         else:
-            print(f"\n  {yellow('!')} Unknown company '{arg}'. Valid: hackerrank, claude, visa, none.\n")
-        return True
+            print(f"\n  {yellow('!')} Unknown company '{arg}'. Valid: {', '.join(sorted(VALID_COMPANIES))}, none.\n")
 
-    def _dispatch_command(self, raw: str) -> bool | None:
-        """Returns True if handled as command, None if not a command."""
-        stripped = raw.strip()
-        lower = stripped.lower()
+    def _dispatch(self, raw: str) -> bool:
+        """Returns True if handled as a command, False if it's a user question."""
+        lower = raw.strip().lower()
 
-        if lower in {"quit", "exit", "q", ":q", "bye"}:
+        if lower in {"quit", "exit", "q", ":q", "bye", "goodbye"}:
             print(f"\n  {dim('Goodbye! 👋')}\n")
             sys.exit(0)
 
         if lower in {"help", "?"}:
-            return self._cmd_help(stripped)
+            self._cmd_help()
+            return True
 
         if lower in {"clear", "cls"}:
-            return self._cmd_clear(stripped)
+            self._cmd_clear()
+            return True
 
         if lower in {"history", "hist", "h"}:
-            return self._cmd_history(stripped)
-
-        if lower.startswith("company "):
-            return self._cmd_company(stripped[8:])
+            self._cmd_history()
+            return True
 
         if lower == "company":
             current = self.company_override or "auto-detect"
-            print(f"\n  Current company context: {bold(current)}\n")
+            fn = COMPANY_COLOURS.get(self.company_override, dim)
+            print(f"\n  Current company: {fn(current)}\n")
             return True
 
-        return None
+        if lower.startswith("company "):
+            self._cmd_company(raw.strip()[8:])
+            return True
+
+        return False
 
     # ------------------------------------------------------------------
     # Ticket processing
     # ------------------------------------------------------------------
 
-    def _process_message(self, text: str, subject: str = "") -> dict:
-        """Run message through the triage agent and return the result dict."""
+    def _triage(self, text: str) -> dict:
         import pandas as pd
-
-        row = pd.Series(
-            {
-                "Issue": text,
-                "Subject": subject,
-                "Company": self.company_override or "",
-            }
-        )
+        row = pd.Series({
+            "Issue": text,
+            "Subject": "",
+            "Company": self.company_override or "",
+        })
         return self._agent.process_ticket(row)
 
     # ------------------------------------------------------------------
-    # Main loop
+    # Main REPL loop
     # ------------------------------------------------------------------
 
     def run(self, force_reindex: bool = False) -> None:
         print(BANNER)
         if self.company_override:
             fn = COMPANY_COLOURS.get(self.company_override, dim)
-            print(f"  Company context pre-set: {fn(self.company_override)}\n")
+            print(f"  Company context: {fn(self.company_override)}\n")
 
         self.boot(force_reindex=force_reindex)
 
-        prompt_prefix = cyan("  ›  ")
-
         while True:
             try:
-                raw = input(f"{bold(prompt_prefix)}").strip()
+                raw = input(f"{bold(cyan('  ›  '))}").strip()
             except (EOFError, KeyboardInterrupt):
                 print(f"\n  {dim('Interrupted. Goodbye! 👋')}\n")
                 break
@@ -307,32 +298,29 @@ class ChatSession:
             if not raw:
                 continue
 
-            # Check for commands
-            handled = self._dispatch_command(raw)
-            if handled is True:
+            if self._dispatch(raw):
                 continue
 
-            # It's a support question — triage it
+            # It's a support question
             self._turn += 1
-            _print_user(raw, self.company_override)
-
-            # Record in history
+            _print_user_turn(raw, self.company_override)
             self.history.append({"role": "user", "text": raw})
 
             spinner = Spinner("Thinking")
             spinner.start()
-
             try:
-                result = self._process_message(raw)
+                result = self._triage(raw)
             except Exception as exc:
                 spinner.stop()
-                print(f"\n  {red('✗')} Error processing ticket: {exc}\n")
+                print(f"  {red('✗')} Error: {exc}\n")
                 continue
-
             spinner.stop()
-            _print_reply(result, self._turn)
 
-            self.history.append({"role": "agent", "text": result.get("response", ""), "result": result})
+            response = result.get("response", "Sorry, I could not generate a response.")
+            escalated = result.get("status") == "escalated"
+
+            _print_agent_turn(response, escalated)
+            self.history.append({"role": "agent", "text": response})
 
 
 # ---------------------------------------------------------------------------
@@ -341,13 +329,13 @@ class ChatSession:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="HackerRank Orchestrate — Interactive CLI Support Chat Agent"
+        description="HackerRank Orchestrate — Interactive Support Chat Agent"
     )
     parser.add_argument(
         "--company",
-        choices=["hackerrank", "claude", "visa"],
+        choices=list(VALID_COMPANIES),
         default=None,
-        help="Pre-set the company context (skips auto-detection)",
+        help="Pre-set company context",
     )
     parser.add_argument(
         "--reindex",

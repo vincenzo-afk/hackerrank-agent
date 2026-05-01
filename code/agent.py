@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -11,6 +12,10 @@ from escalation import EscalationEngine
 from prompts import ESCALATION_MESSAGE_TEMPLATE, RESPONSE_PROMPT_TEMPLATE, SYSTEM_PROMPT
 from retriever import CorpusRetriever
 from utils import debug_log, normalize_company, sanitize_plaintext
+
+# Max retry attempts and initial backoff delay (seconds) — configurable via env
+_MAX_RETRIES = int(os.getenv("GROQ_MAX_RETRIES", 3))
+_RETRY_BACKOFF = float(os.getenv("GROQ_RETRY_BACKOFF", 5.0))
 
 
 @dataclass(frozen=True)
@@ -207,28 +212,60 @@ class TriageAgent:
         docs_block = self._format_docs(chunks)
         user_msg = RESPONSE_PROMPT_TEMPLATE.format(
             company=company or "unknown",
-            subject=subject or "",
             issue=issue or "",
             docs_block=docs_block,
         )
 
-        completion = self._client.chat.completions.create(
-            model=self.model,
-            temperature=self.temperature,
-            max_tokens=self.max_tokens,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
+        last_exc: Exception | None = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                completion = self._client.chat.completions.create(
+                    model=self.model,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_msg},
+                    ],
+                )
+                try:
+                    content = completion.choices[0].message.content
+                except Exception:
+                    content = None
+                return sanitize_plaintext(content or "")
+
+            except Exception as exc:
+                last_exc = exc
+                err_str = str(exc).lower()
+                is_rate_limit = "rate_limit" in err_str or "429" in err_str or "tokens per day" in err_str
+
+                if is_rate_limit:
+                    # Try to parse Retry-After seconds from error message
+                    import re
+                    m = re.search(r"try again in (\d+)m([\d.]+)s", str(exc))
+                    wait = (int(m.group(1)) * 60 + float(m.group(2))) if m else (_RETRY_BACKOFF * (2 ** (attempt - 1)))
+                    wait = min(wait, 120)  # cap at 2 minutes per retry
+                    debug_log(
+                        run_id=os.getenv("DEBUG_RUN_ID", "run"),
+                        hypothesis_id="H5",
+                        location="agent.py:generate_response",
+                        message=f"Rate limit hit (attempt {attempt}/{_MAX_RETRIES}); waiting {wait:.1f}s",
+                        data={"attempt": attempt, "wait": wait},
+                    )
+                    print(f"[agent] Rate limit hit. Waiting {wait:.0f}s before retry ({attempt}/{_MAX_RETRIES})…")
+                    time.sleep(wait)
+                else:
+                    # Non-retryable error — break immediately
+                    break
+
+        debug_log(
+            run_id=os.getenv("DEBUG_RUN_ID", "run"),
+            hypothesis_id="H5",
+            location="agent.py:generate_response",
+            message="All retries exhausted",
+            data={"error": str(last_exc)},
         )
-
-        content = None
-        try:
-            content = completion.choices[0].message.content
-        except Exception:
-            content = None
-
-        return sanitize_plaintext(content or "")
+        return ""  # Caller escalates on empty response
 
     def process_ticket(self, row) -> dict:
         issue = str(row.get("Issue", "") or "")
@@ -254,10 +291,11 @@ class TriageAgent:
             ).__dict__
 
         # Step 2: Build retrieval query (issue + non-trivial subject)
-        query = issue.strip()
+        query_parts = [issue.strip()]
         subj = subject.strip()
         if subj and subj.lower() not in {"help", "help needed", "support", "issue", ""}:
-            query = f"{query}\n{subj}".strip()
+            query_parts.append(subj)
+        query = " ".join(query_parts)
 
         # Step 3: Retrieve with company boost if known
         chunks = self.retriever.retrieve(query=query, company=company, top_k=5)
