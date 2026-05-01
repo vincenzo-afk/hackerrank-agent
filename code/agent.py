@@ -204,7 +204,12 @@ class TriageAgent:
         return product_area, request_type
 
     def generate_response(
-        self, company: str | None, issue: str, subject: str, chunks: list[dict]
+        self,
+        company: str | None,
+        issue: str,
+        subject: str,
+        chunks: list[dict],
+        conversation_history: list[dict] | None = None,
     ) -> str:
         if not self._client:
             return ""
@@ -216,6 +221,16 @@ class TriageAgent:
             docs_block=docs_block,
         )
 
+        # Build messages — include prior turns for multi-turn awareness
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        if conversation_history:
+            # Trim to last N turns to stay within token budget
+            max_turns = int(os.getenv("CHAT_HISTORY_TURNS", 6))
+            for h in conversation_history[-max_turns:]:
+                if h.get("role") in {"user", "assistant"}:
+                    messages.append({"role": h["role"], "content": h["content"]})
+        messages.append({"role": "user", "content": user_msg})
+
         last_exc: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
@@ -223,10 +238,7 @@ class TriageAgent:
                     model=self.model,
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
-                    messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_msg},
-                    ],
+                    messages=messages,
                 )
                 try:
                     content = completion.choices[0].message.content
@@ -267,7 +279,9 @@ class TriageAgent:
         )
         return ""  # Caller escalates on empty response
 
-    def process_ticket(self, row) -> dict:
+    def process_ticket(
+        self, row, conversation_history: list[dict] | None = None
+    ) -> dict:
         issue = str(row.get("Issue", "") or "")
         subject = str(row.get("Subject", "") or "")
         company_raw = str(row.get("Company", "") or "")
@@ -339,8 +353,9 @@ class TriageAgent:
         # Step 6: Classify product area + request type
         product_area, request_type = self.classify(company, issue, subject, chunks)
 
-        # Step 7: Generate grounded LLM response
-        response = self.generate_response(company, issue, subject, chunks)
+        # Step 7: Generate grounded LLM response (with conversation history)
+        response = self.generate_response(company, issue, subject, chunks,
+                                          conversation_history=conversation_history)
         if not response:
             # Empty LLM response → escalate rather than return blank
             debug_log(

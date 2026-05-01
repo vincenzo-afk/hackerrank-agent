@@ -311,8 +311,32 @@ class CorpusRetriever:
         np.save(emb_path, emb)
         meta_path.write_text(json.dumps(meta_key), encoding="utf-8")
         print(f"[retriever] Index built and cached ({emb.shape[0]} vectors).")
-
         return emb
+
+
+    # ------------------------------------------------------------------
+    # Hybrid retrieval helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _keyword_scores(query: str, chunks: list[Chunk]) -> np.ndarray:
+        """
+        Lightweight BM25-style keyword score.
+        For each chunk, count how many unique query tokens appear in it,
+        normalised by the total number of unique query tokens.
+        Returns a float32 array aligned to chunks.
+        """
+        tokens = set(_re.sub(r"[^\w\s]", " ", query.lower()).split())
+        tokens = {t for t in tokens if len(t) > 2}  # skip very short stop words
+        if not tokens:
+            return np.zeros(len(chunks), dtype=np.float32)
+
+        scores = np.zeros(len(chunks), dtype=np.float32)
+        for i, ch in enumerate(chunks):
+            chunk_lower = ch.text.lower()
+            hits = sum(1 for t in tokens if t in chunk_lower)
+            scores[i] = hits / len(tokens)
+        return scores
 
     def retrieve(self, query: str, company: str | None = None, top_k: int | None = None) -> list[dict]:
         if not query or not query.strip():
@@ -325,31 +349,39 @@ class CorpusRetriever:
             return []
 
         _top_k = top_k if top_k is not None else DEFAULT_TOP_K
+        # alpha=1.0 → pure semantic, alpha=0.0 → pure keyword
+        alpha = float(os.getenv("HYBRID_ALPHA", 0.7))
 
         if self._model is None:
             self._model = SentenceTransformer(self.model_name)
 
+        # Semantic scores
         q_emb = self._model.encode([query], normalize_embeddings=True)
         q_emb = np.asarray(q_emb, dtype=np.float32)
+        sem_scores = cosine_similarity(q_emb, self._embeddings)[0].astype(np.float32)
 
-        sims = cosine_similarity(q_emb, self._embeddings)[0].astype(np.float32)
+        # Keyword scores
+        kw_scores = self._keyword_scores(query, self._chunks)
 
-        # Company-domain boost
+        # Hybrid blend
+        combined = alpha * sem_scores + (1.0 - alpha) * kw_scores
+
+        # Company-domain boost (applied after blend)
         if company is not None:
             c = company.strip().lower()
             for i, ch in enumerate(self._chunks):
                 if ch.source_company.lower() == c:
-                    sims[i] = min(1.0, sims[i] * COMPANY_BOOST)
+                    combined[i] = min(1.5, combined[i] * COMPANY_BOOST)
 
         # Retrieve top-K candidates
+        import math
         k = min(max(1, _top_k * 5), len(self._chunks))
-        top_idx = np.argpartition(-sims, kth=k - 1)[:k]
-        top_idx = top_idx[np.argsort(-sims[top_idx])]
+        top_idx = np.argpartition(-combined, kth=k - 1)[:k]
+        top_idx = top_idx[np.argsort(-combined[top_idx])]
 
         results: list[dict] = []
         for i in top_idx[:_top_k]:
-            score = float(sims[i])
-            import math
+            score = float(combined[i])
             if math.isnan(score) or score < self.min_score:
                 continue
             ch = self._chunks[int(i)]
@@ -357,17 +389,22 @@ class CorpusRetriever:
                 "text": ch.text,
                 "source_company": ch.source_company,
                 "filename": ch.filename,
-                "score": score,
+                "score": round(score, 4),
+                "sem_score": round(float(sem_scores[i]), 4),
+                "kw_score": round(float(kw_scores[i]), 4),
             })
 
         debug_log(
             run_id=os.getenv("DEBUG_RUN_ID", "run"),
             hypothesis_id="H2",
             location="retriever.py:retrieve",
-            message="Retrieved chunks" if results else "No chunks above threshold",
+            message="Hybrid retrieval results" if results else "No chunks above threshold",
             data={
                 "company_boost": company,
-                "top_score": float(results[0]["score"]) if results else None,
+                "alpha": alpha,
+                "top_score": results[0]["score"] if results else None,
+                "top_sem": results[0]["sem_score"] if results else None,
+                "top_kw": results[0]["kw_score"] if results else None,
                 "kept": len(results),
                 "top_source": results[0].get("source_company") if results else None,
             },

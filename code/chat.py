@@ -159,7 +159,8 @@ def _print_agent_turn(response: str, escalated: bool) -> None:
 class ChatSession:
     def __init__(self, preset_company: str | None = None) -> None:
         self.company_override: str | None = preset_company
-        self.history: list[dict] = []
+        self.history: list[dict] = []          # display history (role/text)
+        self.llm_history: list[dict] = []      # OpenAI-format history passed to LLM
         self._turn = 0
         self._retriever = None
         self._agent = None
@@ -274,7 +275,7 @@ class ChatSession:
             "Subject": "",
             "Company": self.company_override or "",
         })
-        return self._agent.process_ticket(row)
+        return self._agent.process_ticket(row, conversation_history=self.llm_history)
 
     # ------------------------------------------------------------------
     # Main REPL loop
@@ -320,7 +321,12 @@ class ChatSession:
             escalated = result.get("status") == "escalated"
 
             _print_agent_turn(response, escalated)
+
+            # Store for display
             self.history.append({"role": "agent", "text": response})
+            # Store in LLM format for multi-turn memory
+            self.llm_history.append({"role": "user", "content": raw})
+            self.llm_history.append({"role": "assistant", "content": response})
 
 
 # ---------------------------------------------------------------------------
