@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +9,6 @@ from typing import Iterable
 
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
-from tqdm import tqdm
 
 from utils import debug_log
 
@@ -84,6 +84,7 @@ def _safe_read_text(path: Path) -> str:
 def _infer_source_company_from_path(path: Path) -> str:
     """
     Infer company from the first directory component under data/.
+    Returns 'generic' for any path not under a known company folder.
     Does NOT substring-match on the repo root to avoid false positives.
     """
     valid = {"hackerrank", "claude", "visa"}
@@ -91,7 +92,9 @@ def _infer_source_company_from_path(path: Path) -> str:
         rel = path.relative_to(DATA_DIR)
         if rel.parts:
             top = rel.parts[0].lower()
-            return top if top in valid else top
+            # BUG FIX: was `return top if top in valid else top`
+            # which returned arbitrary folder names as company identifiers.
+            return top if top in valid else "generic"
     except Exception:
         pass
     return "generic"

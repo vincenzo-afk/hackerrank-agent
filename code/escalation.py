@@ -2,19 +2,19 @@ from __future__ import annotations
 
 import re
 import os
+from typing import Pattern
 
 from utils import debug_log
 
 # ---------------------------------------------------------------------------
-# Patterns — loaded from env overrides or defaults
+# Patterns — loaded from env overrides or defaults, compiled once at import
 # ---------------------------------------------------------------------------
 
-def _env_list(var: str, default: list[str]) -> list[str]:
-    """Allow env var to extend default patterns with semicolon-separated values."""
+def _env_list(var: str, default: list[str]) -> list[Pattern]:
+    """Allow env var to extend default patterns; returns compiled regexes."""
     extra = os.getenv(var, "")
-    if extra:
-        return default + [p.strip() for p in extra.split(";") if p.strip()]
-    return default
+    patterns = default + [p.strip() for p in extra.split(";") if p.strip()]
+    return [re.compile(pat, flags=re.IGNORECASE | re.DOTALL) for pat in patterns]
 
 
 _INJECTION_PATTERNS = _env_list("ESCALATION_INJECTION_EXTRA", [
@@ -102,16 +102,16 @@ _VISA_FAQ_PATTERNS = _env_list("ESCALATION_VISA_FAQ_EXTRA", [
 ])
 
 _NON_ENGLISH_HINTS = [
-    r"[àâçéèêëîïôùûüÿœæ]",
-    r"\b(bonjour|merci|svp|s'il vous plaît|je veux|affiche)\b",
+    re.compile(r"[àâçéèêëîïôùûüÿœæ]", flags=re.IGNORECASE | re.DOTALL),
+    re.compile(r"\b(bonjour|merci|svp|s'il vous plaît|je veux|affiche)\b", flags=re.IGNORECASE | re.DOTALL),
 ]
 
 _REPEATED_CHAR_PATTERN = re.compile(r"(.)\1{8,}")  # 9+ same chars in a row (spam)
 
 
-def _matches_any(patterns: list[str], text: str) -> bool:
+def _matches_any(patterns: list[Pattern], text: str) -> bool:
     for pat in patterns:
-        if re.search(pat, text, flags=re.IGNORECASE | re.DOTALL):
+        if pat.search(text):
             return True
     return False
 

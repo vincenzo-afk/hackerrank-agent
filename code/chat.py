@@ -16,6 +16,7 @@ import threading
 import time
 from pathlib import Path
 
+import pandas as pd
 from dotenv import load_dotenv
 
 # ---------------------------------------------------------------------------
@@ -185,16 +186,19 @@ class ChatSession:
 
         spinner = Spinner("Indexing corpus")
         spinner.start()
+        boot_ok = False
         try:
             self._retriever = CorpusRetriever()
             self._retriever.load_and_index(force_reindex=force_reindex)
             self._agent = TriageAgent(self._retriever)
+            boot_ok = True
         except Exception as e:
-            spinner.stop()
+            spinner.stop()  # stop before printing error so line is clean
             print(f"\n  {red('✗')} Failed to boot: {e}\n")
             sys.exit(1)
         finally:
-            spinner.stop()
+            if boot_ok:   # only stop spinner if we didn't stop it in the except block
+                spinner.stop()
 
         print(f"  {green('✓')} Ready. {dim('Type')} {yellow('help')} {dim('for commands.')}\n")
 
@@ -269,7 +273,6 @@ class ChatSession:
     # ------------------------------------------------------------------
 
     def _triage(self, text: str) -> dict:
-        import pandas as pd
         row = pd.Series({
             "Issue": text,
             "Subject": "",
