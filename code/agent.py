@@ -360,7 +360,7 @@ class TriageAgent:
         run_id = os.getenv("DEBUG_RUN_ID", "run")
 
         # ── Step 1: Pre-retrieval escalation checks ───────────────────────
-        pre_escalate, pre_reason = self.escalation.should_escalate(issue, company, chunks=[])
+        pre_escalate, pre_reason = self.escalation.should_escalate(issue, company, chunks=[], is_pre_retrieval=True)
         if pre_escalate:
             product_area, request_type = self.classify(company, issue, subject, [])
             debug_log(run_id=run_id, hypothesis_id="H3",

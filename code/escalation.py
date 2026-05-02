@@ -117,7 +117,7 @@ def _matches_any(patterns: list[Pattern], text: str) -> bool:
 
 
 class EscalationEngine:
-    def should_escalate(self, issue: str, company: str | None, chunks: list[dict]) -> tuple[bool, str]:
+    def should_escalate(self, issue: str, company: str | None, chunks: list[dict], is_pre_retrieval: bool = False) -> tuple[bool, str]:
         text = f"{issue or ''}".strip()
         lc = text.lower()
 
@@ -189,20 +189,24 @@ class EscalationEngine:
                 if any(k in blob for k in ["bug bounty", "security report", "responsible disclosure", "security@", "vulnerability"]):
                     return False, ""
                 return True, "security: vulnerability report not covered by documentation"
-            # Defer to post-retrieval
+            # Defer to post-retrieval if we haven't retrieved yet
+            if not is_pre_retrieval:
+                return True, "security: vulnerability report not covered by documentation"
 
-        # ── Out-of-scope / no context ─────────────────────────────────────
-        if company is None and not chunks:
-            if not any(w in lc for w in ["account", "billing", "payment", "error", "access", "help", "support", "issue", "card", "api", "test", "assessment"]):
-                return True, "out_of_scope: no relevant documentation found"
+        # ── The following checks rely on the ABSENCE of documentation ──────
+        if not is_pre_retrieval:
+            # ── Out-of-scope / no context ─────────────────────────────────────
+            if company is None and not chunks:
+                if not any(w in lc for w in ["account", "billing", "payment", "error", "access", "help", "support", "issue", "card", "api", "test", "assessment"]):
+                    return True, "out_of_scope: no relevant documentation found"
 
-        # ── Vague with no docs ────────────────────────────────────────────
-        if company is None and not chunks:
-            if len(lc) < 30 or lc in {"it's not working", "its not working", "not working", "help"}:
-                return True, "vague: insufficient details and no documentation match"
+            # ── Vague with no docs ────────────────────────────────────────────
+            if company is None and not chunks:
+                if len(lc) < 30 or lc in {"it's not working", "its not working", "not working", "help"}:
+                    return True, "vague: insufficient details and no documentation match"
 
-        # ── Sensitive topic with no supporting docs ───────────────────────
-        if not chunks and _matches_any(_SENSITIVE_TOPICS, text):
-            return True, "sensitive: topic with no supporting documentation found"
+            # ── Sensitive topic with no supporting docs ───────────────────────
+            if not chunks and _matches_any(_SENSITIVE_TOPICS, text):
+                return True, "sensitive: topic with no supporting documentation found"
 
         return False, ""
