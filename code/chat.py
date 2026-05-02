@@ -146,10 +146,26 @@ def _print_user_turn(text: str, company: str | None) -> None:
     print(f"  {dim('›')} {text}\n")
 
 
-def _print_agent_turn(response: str, escalated: bool) -> None:
-    prefix = bold(red("Agent")) if escalated else bold(green("Agent"))
-    print(f"  {prefix}")
-    print(_wrap(response))
+def _print_agent_turn(result: dict) -> None:
+    status = result.get("status", "")
+    area = result.get("product_area", "")
+    req_type = result.get("request_type", "")
+    response = result.get("response", "")
+    justification = result.get("justification", "")
+
+    # We want a 52 character width bar:
+    bar = cyan("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print(f"  {bar}")
+    print(f"  {bold('STATUS')}       : {status}")
+    print(f"  {bold('PRODUCT AREA')} : {area}")
+    print(f"  {bold('REQUEST TYPE')} : {req_type}")
+    
+    resp_lines = textwrap.fill(response, width=52, subsequent_indent="                 ")
+    print(f"  {bold('RESPONSE')}     : {resp_lines}")
+    
+    just_lines = textwrap.fill(justification, width=52, subsequent_indent="                 ")
+    print(f"  {bold('JUSTIFICATION')}: {just_lines}")
+    print(f"  {bar}")
     print()
 
 
@@ -321,9 +337,8 @@ class ChatSession:
             spinner.stop()
 
             response = result.get("response", "Sorry, I could not generate a response.")
-            escalated = result.get("status") == "escalated"
 
-            _print_agent_turn(response, escalated)
+            _print_agent_turn(result)
 
             # Store for display
             self.history.append({"role": "agent", "text": response})
