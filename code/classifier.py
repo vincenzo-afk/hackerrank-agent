@@ -10,7 +10,7 @@ def infer_company(issue: str, subject: str, company: str | None, retrieved_chunk
     text = f"{subject or ''}\n{issue or ''}".lower()
     if any(k in text for k in ["hackerrank", "assessment", "assessments", "test", "tests", "candidate", "recruiter", "interview"]):
         return "hackerrank"
-    if any(k in text for k in ["claude", "anthropic", "conversation", "workspace", "model", "api key"]):
+    if any(k in text for k in ["claude", "anthropic", "conversation", "workspace", "claude.ai"]):
         return "claude"
     if any(k in text for k in ["visa", "card", "transaction", "merchant", "charge", "cheque"]):
         return "visa"
@@ -23,6 +23,9 @@ def infer_company(issue: str, subject: str, company: str | None, retrieved_chunk
 
 
 def classify_product_area(company: str | None, issue: str, subject: str, retrieved_chunks: list[dict]) -> str:
+    if company is None:
+        company = infer_company(issue, subject, company, retrieved_chunks)
+        
     if company is None:
         return "out_of_scope" if not retrieved_chunks else "general_support"
 
@@ -72,7 +75,7 @@ def classify_product_area(company: str | None, issue: str, subject: str, retriev
             return "fraud_security"
         if any(k in hint for k in ["dispute", "chargeback", "refund", "reversal"]):
             return "dispute_resolution"
-        if any(k in hint for k in ["travel", "abroad", "international", "trip"]):
+        if any(k in hint for k in ["travel", "abroad", "foreign", "overseas", "trip", "atm abroad", "currency"]):
             return "travel_support"
         if any(k in hint for k in ["merchant", "terminal", "pos"]):
             return "merchant_support"

@@ -25,6 +25,8 @@ _INJECTION_PATTERNS = _env_list("ESCALATION_INJECTION_EXTRA", [
     r"\b(règles internes|documents récupérés|logique exacte|affiche)\b",
     r"\b(act as|pretend to be|roleplay as)\b.*\b(admin|root|developer|god mode)\b",
     r"\b(jailbreak|dan mode|do anything now)\b",
+    r"\b(show me your prompt|reveal your instructions|display internal rules)\b",
+    r"\b(show retrieved documents|what are your rules)\b",
 ])
 
 _MALICIOUS_PATTERNS = _env_list("ESCALATION_MALICIOUS_EXTRA", [
@@ -35,6 +37,7 @@ _MALICIOUS_PATTERNS = _env_list("ESCALATION_MALICIOUS_EXTRA", [
     r"\bexploit\b.*\b(vulnerability|system)\b",
     r"\b(drop table|truncate table|delete from)\b",
     r"\b(exec|eval|os\.system|subprocess)\b.*\(",
+    r"\b(system commands)\b",
 ])
 
 _SECURITY_REPORT_PATTERNS = _env_list("ESCALATION_SECURITY_EXTRA", [
@@ -43,15 +46,26 @@ _SECURITY_REPORT_PATTERNS = _env_list("ESCALATION_SECURITY_EXTRA", [
 
 _IDENTITY_THEFT_PATTERNS = _env_list("ESCALATION_IDENTITY_EXTRA", [
     r"\b(identity theft|my identity has been stolen|my identity was stolen)\b",
+    r"\b(identity stolen|someone stole)\b",
 ])
 
 _FRAUD_PATTERNS = _env_list("ESCALATION_FRAUD_EXTRA", [
     r"\b(fraud|fraudulent|stolen card|lost card|card was stolen|card has been stolen|unauthorized transaction)\b",
+    r"\b(card stolen|card lost|fraudulent charge|unauthorized charge|fraud on my account)\b",
 ])
 
 _NON_OWNER_ACCESS_PATTERNS = _env_list("ESCALATION_NON_OWNER_EXTRA", [
     r"\b(i am not (the )?(owner|admin)|not an admin|not the account owner)\b",
     r"\bplease restore (my )?access\b",
+    r"\b(lost access|access lost|lost my access)\b",
+    r"\b(can't log in|cannot login|can't login|unable to log in)\b",
+    r"\b(locked out|account locked|lost account|account inaccessible)\b",
+    r"\b(login not working|sign in not working|can't sign in)\b",
+    r"\b(unable to access|no longer have access)\b",
+    r"\b(lost claude access|lost hackerrank access|lost visa access)\b",
+    r"\baccess\b.*\blost\b",
+    r"\b(lost|lose)\b.*\baccess\b",
+    r"\bcan.?t\s+(get\s+in|access|open|use)\b",
 ])
 
 _SCORE_MANIPULATION_PATTERNS = _env_list("ESCALATION_SCORE_EXTRA", [
@@ -59,11 +73,16 @@ _SCORE_MANIPULATION_PATTERNS = _env_list("ESCALATION_SCORE_EXTRA", [
     r"\b(reverse (the )?(decision|result))\b",
     r"\brecruiter\b.*\b(reverse|change|rejected|move me)\b",
     r"\b(graded me unfairly|must have graded me)\b",
+    r"\b(wrong score|reverse the decision|change recruiter decision)\b",
+    r"\b(undo rejection|reconsider my application|overturn decision)\b",
 ])
 
 _OUTAGE_PATTERNS = _env_list("ESCALATION_OUTAGE_EXTRA", [
     r"\b(stopped working completely|all requests are failing|site is down|service is down|outage)\b",
     r"\b(none of the submissions.*working|submissions.*not working across)\b",
+    r"\b(completely down|not working for everyone|nothing is working)\b",
+    r"\b(all submissions failing|everyone is having issues)\b",
+    r"\b(widespread issue|mass outage|platform down)\b",
 ])
 
 _SENSITIVE_TOPICS = _env_list("ESCALATION_SENSITIVE_EXTRA", [
@@ -88,10 +107,16 @@ _URGENT_CASH_PATTERNS = _env_list("ESCALATION_CASH_EXTRA", [
     r"\bneed cash\b",
     r"\bonly the visa card\b",
     r"\bneed.*cash.*right now\b",
+    r"\bneed cash now\b",
 ])
 
 _DEMAND_ACTION_PATTERNS = _env_list("ESCALATION_DEMAND_EXTRA", [
     r"\b(refund me|ban the seller|block the merchant|make visa refund|chargeback|reverse the charge)\b",
+    r"\b(dispute charge)\b",
+    r"\b(give me my money|my money back|want my money|return my money|where is my money)\b",
+    r"\b(i want a refund|give me a refund|need a refund)\b",
+    r"\b(take my money|stole my money|missing money|lost my money)\b",
+    r"\b(not received|never received|waiting for)\b.{0,30}\b(money|payment|refund)\b",
 ])
 
 _VISA_FAQ_PATTERNS = _env_list("ESCALATION_VISA_FAQ_EXTRA", [
@@ -99,6 +124,12 @@ _VISA_FAQ_PATTERNS = _env_list("ESCALATION_VISA_FAQ_EXTRA", [
     r"\bwhat should i do if my visa card has been lost or stolen\b",
     r"\bwhere can i report a lost or stolen visa card\b",
     r"\bwhy was my card declined\b",
+])
+
+_VAGUE_PATTERNS = _env_list("ESCALATION_VAGUE_EXTRA", [
+    r"\b(it's not working|its not working|not working help)\b",
+    r"\b(just stopped working|help me|need help|something is wrong)\b",
+    r"\b(it stopped|broken|doesn't work)\b",
 ])
 
 _NON_ENGLISH_HINTS = [
@@ -201,8 +232,8 @@ class EscalationEngine:
                     return True, "out_of_scope: no relevant documentation found"
 
             # ── Vague with no docs ────────────────────────────────────────────
-            if company is None and not chunks:
-                if len(lc) < 30 or lc in {"it's not working", "its not working", "not working", "help"}:
+            if company is None and (not chunks or len(lc) < 20):
+                if _matches_any(_VAGUE_PATTERNS, text) or len(lc.split()) <= 3:
                     return True, "vague: insufficient details and no documentation match"
 
             # ── Sensitive topic with no supporting docs ───────────────────────
